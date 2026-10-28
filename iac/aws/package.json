@@ -1,0 +1,17 @@
+{
+  "name": "@muse-mcp-test/aws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.275.0",
+    "cdk-nag": "^3.0.1",
+    "constructs": "^10.7.0"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1146.1"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@muse-mcp-test/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/dsql-signer": "^3.1157.0",
+    "pg": "^8.23.1"
+  }
+}

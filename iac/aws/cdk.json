@@ -1,0 +1,9 @@
+{
+  "app": "npx tsx bin/cdk.ts",
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:explicitStackTags": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/aws-lambda:useCdkManagedLogGroup": true
+  }
+}

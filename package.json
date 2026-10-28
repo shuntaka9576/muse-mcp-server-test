@@ -1,0 +1,31 @@
+{
+  "name": "muse-mcp-server-test",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "workspaces": [
+    "apps/*",
+    "iac/*"
+  ],
+  "scripts": {
+    "type-check": "tsc --noEmit && bun --filter @muse-mcp-test/aws type-check",
+    "test": "vitest run",
+    "lint": "prettier --check .",
+    "format": "prettier --write .",
+    "mcp:test": "tsx tools/test-connection.ts",
+    "db:init": "tsx tools/init-database.ts",
+    "db:verify": "tsx tools/verify-database.ts",
+    "proxy:build": "bash tools/build-oauth-proxy.sh"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-lambda": "^3.1157.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.23.1",
+    "esbuild": "^0.28.1",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

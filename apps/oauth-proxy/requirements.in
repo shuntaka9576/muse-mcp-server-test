@@ -1,0 +1,2 @@
+fastmcp==4.1.4
+py-key-value-aio[dynamodb]==0.4.6
