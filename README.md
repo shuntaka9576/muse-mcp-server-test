@@ -4,16 +4,13 @@
 
 ## 構成
 
-| 接続先                    | Gatewayの受信認証                             | Lambda・DBロール・スキーマ |
-| ------------------------- | --------------------------------------------- | -------------------------- |
-| `PublicGatewayUrl`        | `NONE`                                        | `booking_noauth`専用       |
-| `AuthenticatedGatewayUrl` | Cognitoのアクセストークンを`CUSTOM_JWT`で検証 | `booking_auth`専用         |
+`AuthenticatedGatewayUrl`は、Cognitoのアクセストークンを`CUSTOM_JWT`で検証するAgentCore Gatewayです。ツールのLambda・DBロール・スキーマは`booking_auth`専用です。
 
 `DcrProxyUrl`はLambda Web FunctionsのHTTPSエンドポイントです。Node.js 24から同梱したPythonを起動し、FastMCP OAuth ProxyがDCR・PKCE・Cognitoログインを処理します。登録情報と暗号化したトークンはDynamoDB、鍵はSecrets Managerに保存します。認証後はCognitoのアクセストークンで`AuthenticatedGatewayUrl`へ接続します。
 
 ProxyのURL・CognitoのクライアントID・`AuthenticatedGatewayUrl`は、SSM Parameter（`/dev-muse-mcp/oauth-proxy/config`）からProxyが起動時に読みます。CognitoのコールバックURLにProxyのURLを使い、GatewayはそのクライアントIDを検証するため、Web Functionsの環境変数に渡すとCloudFormationで循環参照になるからです。
 
-共通のLambdaコードを別々の関数・実行ロールで動かします。DSQLクラスターは共通ですが、各ロールには自身のスキーマだけを許可します。スキーマ名はLambdaの環境変数に固定し、ツール引数から変更できません。
+Lambdaの実行ロールには`booking_auth`スキーマだけを許可します。スキーマ名はLambdaの環境変数に固定し、ツール引数から変更できません。
 
 | ツール                   | 引数                                  | 処理                                           |
 | ------------------------ | ------------------------------------- | ---------------------------------------------- |
@@ -28,7 +25,7 @@ Gatewayが公開する名前は`booking___search_available_rooms`などです。
 
 ## DSQLのデータと二重予約防止
 
-各スキーマに以下のテーブルを作成します。
+`booking_auth`スキーマに以下のテーブルを作成します。
 
 | テーブル         | 内容                                    | LambdaのDB権限               |
 | ---------------- | --------------------------------------- | ---------------------------- |
@@ -69,7 +66,7 @@ CDK bootstrapが未実施なら、`iac/aws`で`bunx cdk bootstrap 'aws://ACCOUNT
 
 `cdk deploy`はIAMの変更を表示して承認を求めます。`proxy:build`で作ったZIPをWeb Functionsのコードとして使うため、Proxyのコードを変えたらデプロイ前にビルドし直します。
 
-URL、DB接続先、Cognito設定などは`.local/outputs.json`に出力されます。`db:init`はスキーマ、テーブル、DBロール、IAMロールとの対応付けを作成し、両スキーマへ同じ初期データを投入します。日付省略時は日本時間の翌日です。既存予約を削除する処理はありません。
+URL、DB接続先、Cognito設定などは`.local/outputs.json`に出力されます。`db:init`はスキーマ、テーブル、DBロール、IAMロールとの対応付けを作成し、初期データを投入します。日付省略時は日本時間の翌日です。既存予約を削除する処理はありません。
 
 | 会議室                 | 定員 | 指定日の14:00〜15:00  |
 | ---------------------- | ---- | --------------------- |
@@ -83,14 +80,11 @@ URL、DB接続先、Cognito設定などは`.local/outputs.json`に出力され�
 
 ```sh
 bun run db:verify --date 2026-10-29
-bun run mcp:test --date 2026-10-29
 ```
 
-`db:verify`はAWS権限で両Lambdaを直接呼び出し、実際のDSQLの行を照合します。予約後に一覧へ載ること、候補から外れること、キャンセル後に候補へ戻ること、定員超過・重複予約の拒否、同時予約2件中1件だけの成功を確認します。検証実行者のIAMロールを各DBロールへ一時的に対応付け、そのDBロールで新規接続します。別スキーマの読み書きと会議室マスターへの書き込みがSQLSTATE `42501`で拒否されることを確認し、一時的な対応付けは終了時に解除します（DSQLでは`SET ROLE`を利用できません）。
+`db:verify`はAWS権限でLambdaを直接呼び出し、実際のDSQLの行を照合します。予約後に一覧へ載ること、候補から外れること、キャンセル後に候補へ戻ること、定員超過・重複予約の拒否、同時予約2件中1件だけの成功を確認します。検証実行者のIAMロールをDBロールへ一時的に対応付け、そのDBロールで新規接続します。会議室マスターへの書き込みがSQLSTATE `42501`で拒否されることを確認し、一時的な対応付けは終了時に解除します（DSQLでは`SET ROLE`を利用できません）。
 
-`mcp:test`は認証なしのGatewayにStreamable HTTPで接続し、`initialize`・4ツールの検出・同じ予約シナリオを実行します。テストが作成した予約は終了時にキャンセルします。初期データの「かえで」が対象時刻に空いていることを前提とするため、Museでその時間を予約した後は先にキャンセルしてください。
-
-結果はそれぞれ`.local/result-database.json`、`.local/result-public.json`へ保存します。Lambdaの専用CloudWatch Logsにもツール名・正規化した引数・結果を記録します。認証トークンは記録しません。
+結果は`.local/result-database.json`へ保存します。Lambdaの専用CloudWatch Logsにもツール名・正規化した引数・結果を記録します。認証トークンは記録しません。
 
 ## Cognitoで認証する
 
@@ -110,27 +104,14 @@ echo "password: $password"
 ```
 
 ```sh
-bun run mcp:test --auth --date 2026-10-29
+bun run mcp:test --date 2026-10-29
 ```
 
-トークンなし・不正トークンの拒否を確認した後、表示されたURLでCognitoへログインします。`http://localhost:8765/callback`で認可コードを受け取り、IDトークンの拒否とアクセストークンによる4ツールの実行を検証します。結果は`.local/result-authenticated.json`へ保存し、トークンはメモリ内だけで扱います。
+`mcp:test`は認証ありのGatewayにStreamable HTTPで接続します。トークンなし・不正トークンの拒否を確認した後、表示されたURLでCognitoへログインします。`http://localhost:8765/callback`で認可コードを受け取り、IDトークンの拒否と、アクセストークンによる`initialize`・4ツールの検出・予約シナリオを検証します。テストが作成した予約は終了時にキャンセルします。初期データの「かえで」が対象時刻に空いていることを前提とするため、Museでその時間を予約した後は先にキャンセルしてください。結果は`.local/result-authenticated.json`へ保存し、トークンはメモリ内だけで扱います。
 
 ## Museから接続する
 
-`PublicGatewayUrl`を次のプロンプトに指定します。
-
-```text
-Create a Custom Connector for my remote MCP server.
-
-Transport: Streamable HTTP
-URL: <PublicGatewayUrl>
-
-Please discover the four meeting room booking tools and test the connection.
-```
-
-続けて「2026年10月29日14時から1時間、4人で使える空き会議室を探して」と依頼します。予約・一覧・再検索・キャンセル・再検索を順に試し、Museの許可画面とDSQLの行を照合します。
-
-認証ありは`DcrProxyUrl`を使用します。Museの操作は利用者が行います。
+`DcrProxyUrl`を次のプロンプトに指定します。Museの操作は利用者が行います。
 
 ```text
 Create a Custom Connector for my remote MCP server.
@@ -145,6 +126,8 @@ Discover the OAuth metadata, register the client, and guide me through Cognito l
 After login, discover the available tools and test the connection using read-only tools.
 ```
 
+接続後に「2026年10月29日14時から1時間、4人で使える空き会議室を探して」と依頼し、予約・一覧・再検索・キャンセル・再検索を順に試します。
+
 CognitoにはProxyの`/auth/callback`を登録済みです。Museのクライアント情報はProxyのDCRで登録します。リダイレクト先は`apps/oauth-proxy/proxy_app.py`の許可リストに制限しています。Museが別ドメインを返した場合は、実際のURIを確認して許可リストを更新します。
 
 Proxyの公開URLでは、DCR登録・Cognitoログイン・PKCE・4ツールの取得・予約一覧・空き検索・トークン更新を確認しました。未認証・不正トークンは401です。結果は`.local/result-dcr-proxy.json`に保存し、一時ユーザーは削除しています。
@@ -155,7 +138,7 @@ GatewayのLambda用CloudFormation `ToolDefinition`には`annotations`フィー�
 
 ## 制限と削除
 
-予約処理の各Lambdaは同時実行数2、タイムアウト30秒です。
+予約処理のLambdaは同時実行数2、タイムアウト30秒です。
 
 ```sh
 cd iac/aws
@@ -170,20 +153,19 @@ bunx cdk destroy
 
 | 検証                                                              | 結果                                                                                  |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| 認証なしGatewayの初期化・4ツール検出                              | 成功                                                                                  |
 | Cognito認可コード＋PKCEでのログイン・認証ありGatewayの4ツール実行 | 成功（ローカルMCPクライアント）                                                       |
 | トークンなし / 不正トークン / IDトークンでの`tools/call`          | HTTP 401 / 401 / 403                                                                  |
 | 保護リソースメタデータ                                            | `WWW-Authenticate`の`resource_metadata`から取得でき、Cognitoのissuerと必要scopeを確認 |
 | 定員・既存予約による検索                                          | 4人の候補は「かえで」のみ                                                             |
-| 予約・一覧・候補からの除外・取消・候補への復帰                    | 両Gateway・両DBスキーマで成功                                                         |
+| 予約・一覧・候補からの除外・取消・候補への復帰                    | 成功                                                                                  |
 | 重複予約 / 定員超過                                               | `ROOM_UNAVAILABLE` / `CAPACITY_EXCEEDED`で拒否                                        |
 | 同時予約2件                                                       | 1件だけ成功、他方を拒否                                                               |
-| 他方のスキーマの読み書き / 会議室マスターへの書き込み             | 両DBロールでSQLSTATE `42501`                                                          |
+| 会議室マスターへの書き込み                                        | SQLSTATE `42501`                                                                      |
 | 実際の`tools/list`の`annotations`                                 | 4ツールともフィールドなし                                                             |
 
-実行証跡は`.local/result-public.json`、`.local/result-authenticated.json`、`.local/result-database.json`に保存しています。検証で作成した予約、一時Cognitoユーザー、一時的なDBロール対応付けは削除・解除し、初期データを残しています。
+実行証跡は`.local/result-authenticated.json`、`.local/result-database.json`に保存しています。検証で作成した予約、一時Cognitoユーザー、一時的なDBロール対応付けは削除・解除し、初期データを残しています。
 
-Museでは認証なしの6操作を確認済みです。認証ありのCustom Connector作成・OAuthログインは、利用者が`DcrProxyUrl`で検証します。
+Museでは、`DcrProxyUrl`でのCustom Connector作成・Cognitoログイン・検索・予約・キャンセルを確認済みです（2026年10月29日）。
 
 ## 参照資料
 

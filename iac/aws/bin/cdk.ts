@@ -13,8 +13,7 @@ const config = getConfig({
 const stack = new McpTestStack(app, `${config.prefix}-test`, {
   config,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: config.region },
-  description:
-    'Muse meeting room booking: DSQL and public/Cognito AgentCore Gateways',
+  description: 'Muse meeting room booking: DSQL and Cognito AgentCore Gateway',
 });
 cdk.Tags.of(stack).add('Project', 'muse-mcp-server-test');
 cdk.Tags.of(stack).add('Stage', config.stageName);

@@ -82,21 +82,17 @@ describe('認証境界', () => {
       ],
     });
   });
-  it('同じ4ツールを別Lambda・別スキーマで2つのGatewayに公開する', () => {
-    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 2);
+  it('4ツールを認証ありのGateway1つだけに公開する', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
     template.resourceCountIs('AWS::Lambda::WebFunction', 1);
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 0);
     const targets = Object.values(
       template.findResources('AWS::BedrockAgentCore::GatewayTarget')
     );
-    expect(targets).toHaveLength(2);
-    const configs = targets.map(
-      (target) => target.Properties.TargetConfiguration.Mcp.Lambda
-    );
-    expect(configs[0].LambdaArn).not.toEqual(configs[1].LambdaArn);
-    expect(configs[0].ToolSchema).toEqual(configs[1].ToolSchema);
+    expect(targets).toHaveLength(1);
+    const [target] = targets;
     expect(
-      configs[0].ToolSchema.InlinePayload.map(
+      target.Properties.TargetConfiguration.Mcp.Lambda.ToolSchema.InlinePayload.map(
         (tool: { Name: string }) => tool.Name
       )
     ).toEqual([
@@ -105,30 +101,19 @@ describe('認証境界', () => {
       'list_reservations',
       'cancel_reservation',
     ]);
+    expect(target.Properties.CredentialProviderConfigurations).toEqual([
+      { CredentialProviderType: 'GATEWAY_IAM_ROLE' },
+    ]);
     template.resourceCountIs('AWS::DSQL::Cluster', 1);
     const functions = Object.values(
       template.findResources('AWS::Lambda::Function')
     ).filter((fn) => fn.Properties.Environment?.Variables?.BOOKING_SCHEMA);
     expect(
-      functions
-        .map((fn) => fn.Properties.Environment.Variables.BOOKING_SCHEMA)
-        .sort()
-    ).toEqual(['booking_auth', 'booking_noauth']);
-    expect(functions[0].Properties.Role).not.toEqual(
-      functions[1].Properties.Role
-    );
-    for (const target of targets) {
-      expect(target.Properties.CredentialProviderConfigurations).toEqual([
-        { CredentialProviderType: 'GATEWAY_IAM_ROLE' },
-      ]);
-    }
+      functions.map((fn) => fn.Properties.Environment.Variables.BOOKING_SCHEMA)
+    ).toEqual(['booking_auth']);
   });
 
-  it('認証なしはNONE、認証ありはclient・scope・token_useを検証する', () => {
-    template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
-      AuthorizerType: 'NONE',
-      AuthorizerConfiguration: Match.absent(),
-    });
+  it('Gatewayはclient・scope・token_useを検証する', () => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
       AuthorizerType: 'CUSTOM_JWT',
       AuthorizerConfiguration: {
@@ -171,7 +156,7 @@ describe('認証境界', () => {
     const roles = Object.entries(
       template.findResources('AWS::IAM::Role')
     ).filter(([id]) => id.includes('GatewayRole'));
-    expect(roles).toHaveLength(2);
+    expect(roles).toHaveLength(1);
     for (const [, role] of roles) {
       expect(role.Properties.AssumeRolePolicyDocument.Statement).toHaveLength(
         1
@@ -189,7 +174,7 @@ describe('認証境界', () => {
     const policies = Object.entries(
       template.findResources('AWS::IAM::Policy')
     ).filter(([id]) => id.includes('InvokeTool'));
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(1);
     for (const [, policy] of policies) {
       expect(policy.Properties.PolicyDocument.Statement).toEqual([
         {
@@ -197,7 +182,7 @@ describe('認証境界', () => {
           Effect: 'Allow',
           Resource: {
             'Fn::GetAtt': [
-              expect.stringMatching(/^(Public|Authenticated)Booking/),
+              expect.stringMatching(/^AuthenticatedBooking/),
               'Arn',
             ],
           },
@@ -224,7 +209,7 @@ describe('認証境界', () => {
     const policies = Object.entries(
       template.findResources('AWS::IAM::Policy')
     ).filter(([id]) => /ToolRoleDefaultPolicy/.test(id));
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(1);
     for (const [, policy] of policies) {
       expect(policy.Properties.PolicyDocument.Statement).toContainEqual({
         Action: 'dsql:DbConnect',

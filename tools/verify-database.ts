@@ -60,133 +60,98 @@ async function main() {
     isolation: [],
   };
   try {
-    for (const [kind, schema, other] of [
-      ['Public', 'booking_noauth', 'booking_auth'],
-      ['Authenticated', 'booking_auth', 'booking_noauth'],
-    ] as const) {
-      const crossBefore = (
-        await pool.query(
-          `SELECT * FROM ${other}.reservations ORDER BY reservation_id`
-        )
-      ).rows;
-      const snapshots: unknown[] = [];
-      const result = await runBookingScenario(
-        async (name, args) => {
-          const response = await lambda.send(
-            new InvokeCommand({
-              FunctionName: output[`${kind}ToolFunctionName`],
-              ClientContext: Buffer.from(
-                JSON.stringify({
-                  custom: { bedrockAgentCoreToolName: `booking___${name}` },
-                })
-              ).toString('base64'),
-              Payload: Buffer.from(JSON.stringify(args)),
-            })
+    const schema = 'booking_auth';
+    const snapshots: unknown[] = [];
+    const result = await runBookingScenario(
+      async (name, args) => {
+        const response = await lambda.send(
+          new InvokeCommand({
+            FunctionName: output.AuthenticatedToolFunctionName,
+            ClientContext: Buffer.from(
+              JSON.stringify({
+                custom: { bedrockAgentCoreToolName: `booking___${name}` },
+              })
+            ).toString('base64'),
+            Payload: Buffer.from(JSON.stringify(args)),
+          })
+        );
+        if (response.FunctionError)
+          throw new Error(
+            `${name}: ${response.FunctionError} (${Buffer.from(response.Payload ?? []).toString('utf8')})`
           );
-          if (response.FunctionError)
-            throw new Error(
-              `${kind} ${name}: ${response.FunctionError} (${Buffer.from(response.Payload ?? []).toString('utf8')})`
-            );
-          return JSON.parse(
-            Buffer.from(response.Payload ?? []).toString('utf8')
-          ) as Result;
-        },
-        date,
-        async (phase, reservation) => {
-          const rows = (
-            await pool.query(
-              `SELECT * FROM ${schema}.reservations ORDER BY reservation_id`
+        return JSON.parse(
+          Buffer.from(response.Payload ?? []).toString('utf8')
+        ) as Result;
+      },
+      date,
+      async (phase, reservation) => {
+        const rows = (
+          await pool.query(
+            `SELECT * FROM ${schema}.reservations ORDER BY reservation_id`
+          )
+        ).rows;
+        if (phase === 'created' || phase === 'concurrent')
+          assert(
+            rows.some(
+              (row) => row.reservation_id === reservation?.reservation_id
             )
-          ).rows;
-          if (phase === 'created' || phase === 'concurrent')
-            assert(
-              rows.some(
-                (row) => row.reservation_id === reservation?.reservation_id
-              )
-            );
-          if (phase === 'cancelled')
-            assert(
-              !rows.some(
-                (row) => row.reservation_id === reservation?.reservation_id
-              )
-            );
-          const crossAfter = (
-            await pool.query(
-              `SELECT * FROM ${other}.reservations ORDER BY reservation_id`
-            )
-          ).rows;
-          assert.deepEqual(
-            crossAfter,
-            crossBefore,
-            '他方のスキーマのデータが変更された'
           );
-          snapshots.push({ phase, rows, otherSchemaUnchanged: true });
-        }
-      );
-      (evidence.scenarios as Record<string, unknown>)[schema] = {
-        ...result,
-        snapshots,
-      };
-      // DSQLはSET ROLE非対応。管理権限を持つ実行者を一時マッピングし、通常DBロールで接続する。
-      const mappings = (
-        await pool.query(
-          'SELECT arn, pg_role_name FROM sys.iam_pg_role_mappings'
-        )
-      ).rows;
-      const alreadyMapped = mappings.some(
-        (row) => row.arn === probeArn && row.pg_role_name === schema
-      );
-      const probe = createPool(output.DatabaseEndpoint, output.Region, schema);
-      try {
-        if (!alreadyMapped)
-          await pool.query(`AWS IAM GRANT ${schema} TO '${probeArn}'`);
-        await probe.query(`SELECT * FROM ${schema}.rooms`);
-        for (const sql of [
-          `SELECT * FROM ${other}.reservations`,
-          `DELETE FROM ${other}.reservations WHERE false`,
-          `INSERT INTO ${schema}.rooms SELECT 'forbidden', 'forbidden', 1 WHERE false`,
-        ]) {
-          let code: string | undefined;
-          try {
-            await probe.query(sql);
-          } catch (error) {
-            code = (error as { code?: string }).code;
-          }
-          assert.equal(code, '42501', `期待した権限拒否になりません: ${sql}`);
-          (evidence.isolation as unknown[]).push({
-            role: schema,
-            sql,
-            sqlState: code,
-            method:
-              'Direct connection as database role with temporary operator IAM mapping',
-          });
-        }
-      } finally {
-        await probe.end();
-        if (!alreadyMapped)
-          await pool.query(`AWS IAM REVOKE ${schema} FROM '${probeArn}'`);
+        if (phase === 'cancelled')
+          assert(
+            !rows.some(
+              (row) => row.reservation_id === reservation?.reservation_id
+            )
+          );
+        snapshots.push({ phase, rows });
       }
-      console.log(`${schema}: 予約・取消・同時予約・DSQL照合・権限分離 OK`);
+    );
+    (evidence.scenarios as Record<string, unknown>)[schema] = {
+      ...result,
+      snapshots,
+    };
+    // DSQLはSET ROLE非対応。管理権限を持つ実行者を一時マッピングし、通常DBロールで接続する。
+    const mappings = (
+      await pool.query('SELECT arn, pg_role_name FROM sys.iam_pg_role_mappings')
+    ).rows;
+    const alreadyMapped = mappings.some(
+      (row) => row.arn === probeArn && row.pg_role_name === schema
+    );
+    const probe = createPool(output.DatabaseEndpoint, output.Region, schema);
+    try {
+      if (!alreadyMapped)
+        await pool.query(`AWS IAM GRANT ${schema} TO '${probeArn}'`);
+      await probe.query(`SELECT * FROM ${schema}.rooms`);
+      const sql = `INSERT INTO ${schema}.rooms SELECT 'forbidden', 'forbidden', 1 WHERE false`;
+      let code: string | undefined;
+      try {
+        await probe.query(sql);
+      } catch (error) {
+        code = (error as { code?: string }).code;
+      }
+      assert.equal(code, '42501', `期待した権限拒否になりません: ${sql}`);
+      (evidence.isolation as unknown[]).push({
+        role: schema,
+        sql,
+        sqlState: code,
+        method:
+          'Direct connection as database role with temporary operator IAM mapping',
+      });
+    } finally {
+      await probe.end();
+      if (!alreadyMapped)
+        await pool.query(`AWS IAM REVOKE ${schema} FROM '${probeArn}'`);
     }
+    console.log(`${schema}: 予約・取消・同時予約・DSQL照合・権限 OK`);
     evidence.iamRoleMappings = (
       await pool.query('SELECT arn, pg_role_name FROM sys.iam_pg_role_mappings')
     ).rows;
-    for (const [kind, schema] of [
-      ['Public', 'booking_noauth'],
-      ['Authenticated', 'booking_auth'],
-    ] as const) {
-      const mappings = evidence.iamRoleMappings as {
-        arn: string;
-        pg_role_name: string;
-      }[];
-      assert.deepEqual(
-        mappings
-          .filter((row) => row.pg_role_name === schema)
-          .map((row) => row.arn),
-        [output[`${kind}ToolRoleArn`]],
-        '一時マッピングが残っている、または別のIAMロールに紐づいている'
-      );
-    }
+    assert.deepEqual(
+      (evidence.iamRoleMappings as { arn: string; pg_role_name: string }[])
+        .filter((row) => row.pg_role_name === schema)
+        .map((row) => row.arn),
+      [output.AuthenticatedToolRoleArn],
+      '一時マッピングが残っている、または別のIAMロールに紐づいている'
+    );
     await mkdir('.local', { recursive: true });
     await writeFile(
       '.local/result-database.json',

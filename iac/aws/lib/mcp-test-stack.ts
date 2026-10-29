@@ -28,71 +28,66 @@ export class McpTestStack extends cdk.Stack {
       tags: [{ key: 'Name', value: `${prefix}-booking` }],
     });
     cluster.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
-    const tools = {} as Record<
-      'Public' | 'Authenticated',
-      nodejs.NodejsFunction
-    >;
-    for (const kind of ['Public', 'Authenticated'] as const) {
-      const schema = kind === 'Public' ? 'booking_noauth' : 'booking_auth';
-      const logGroup = new logs.LogGroup(this, `${kind}ToolLogs`, {
-        logGroupName: `/aws/lambda/${prefix}-${schema}`,
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      });
-      const role = new iam.Role(this, `${kind}ToolRole`, {
-        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      });
-      const logGrant = logGroup.grantWrite(role);
-      role.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['dsql:DbConnect'],
-          resources: [cluster.attrResourceArn],
-        })
-      );
-      const tool = new nodejs.NodejsFunction(this, `${kind}Booking`, {
-        functionName: `${prefix}-${schema}`,
-        entry: fileURLToPath(
-          new URL('../../../apps/mcp-tools/src/index.ts', import.meta.url)
-        ),
-        depsLockFilePath: fileURLToPath(
-          new URL('../../../bun.lock', import.meta.url)
-        ),
-        handler: 'handler',
-        runtime: lambda.Runtime.NODEJS_24_X,
-        architecture: lambda.Architecture.ARM_64,
-        memorySize: 256,
-        timeout: cdk.Duration.seconds(30),
-        reservedConcurrentExecutions: 2,
-        role,
-        logGroup,
-        loggingFormat: lambda.LoggingFormat.JSON,
-        environment: {
-          DSQL_ENDPOINT: cluster.attrEndpoint,
-          DSQL_USER: schema,
-          BOOKING_SCHEMA: schema,
-        },
-        bundling: {
-          format: nodejs.OutputFormat.CJS,
-          target: 'node24',
-          minify: true,
-          externalModules: ['pg-native'],
-        },
-      });
-      logGrant.applyBefore(tool);
-      acknowledge(
-        role,
-        `AwsSolutions-IAM5[Resource::<${this.getLogicalId(logGroup.node.defaultChild as cdk.CfnResource)}.Arn>:*]`,
-        'ログストリームは実行時に生成されるため、専用LogGroup内に限定して許可する。'
-      );
-      tools[kind] = tool;
-      new cdk.CfnOutput(this, `${kind}ToolRoleArn`, { value: role.roleArn });
-      new cdk.CfnOutput(this, `${kind}ToolFunctionName`, {
-        value: tool.functionName,
-      });
-      new cdk.CfnOutput(this, `${kind}ToolLogGroup`, {
-        value: logGroup.logGroupName,
-      });
-    }
+    const schema = 'booking_auth';
+    const toolLogs = new logs.LogGroup(this, 'AuthenticatedToolLogs', {
+      logGroupName: `/aws/lambda/${prefix}-${schema}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const toolRole = new iam.Role(this, 'AuthenticatedToolRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    const logGrant = toolLogs.grantWrite(toolRole);
+    toolRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['dsql:DbConnect'],
+        resources: [cluster.attrResourceArn],
+      })
+    );
+    const tool = new nodejs.NodejsFunction(this, 'AuthenticatedBooking', {
+      functionName: `${prefix}-${schema}`,
+      entry: fileURLToPath(
+        new URL('../../../apps/mcp-tools/src/index.ts', import.meta.url)
+      ),
+      depsLockFilePath: fileURLToPath(
+        new URL('../../../bun.lock', import.meta.url)
+      ),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(30),
+      reservedConcurrentExecutions: 2,
+      role: toolRole,
+      logGroup: toolLogs,
+      loggingFormat: lambda.LoggingFormat.JSON,
+      environment: {
+        DSQL_ENDPOINT: cluster.attrEndpoint,
+        DSQL_USER: schema,
+        BOOKING_SCHEMA: schema,
+      },
+      bundling: {
+        format: nodejs.OutputFormat.CJS,
+        target: 'node24',
+        minify: true,
+        externalModules: ['pg-native'],
+      },
+    });
+    logGrant.applyBefore(tool);
+    acknowledge(
+      toolRole,
+      `AwsSolutions-IAM5[Resource::<${this.getLogicalId(toolLogs.node.defaultChild as cdk.CfnResource)}.Arn>:*]`,
+      'ログストリームは実行時に生成されるため、専用LogGroup内に限定して許可する。'
+    );
+    new cdk.CfnOutput(this, 'AuthenticatedToolRoleArn', {
+      value: toolRole.roleArn,
+    });
+    new cdk.CfnOutput(this, 'AuthenticatedToolFunctionName', {
+      value: tool.functionName,
+    });
+    new cdk.CfnOutput(this, 'AuthenticatedToolLogGroup', {
+      value: toolLogs.logGroupName,
+    });
     new cdk.CfnOutput(this, 'DatabaseEndpoint', {
       value: cluster.attrEndpoint,
     });
@@ -170,103 +165,6 @@ export class McpTestStack extends cdk.Stack {
       '検証終了後にユーザーごと削除するため、削除保護を設定しない。'
     );
 
-    const createGateway = (
-      kind: 'Public' | 'Authenticated'
-    ): agentcore.CfnGateway => {
-      const tool = tools[kind];
-      const gatewayName = `${prefix}-${kind.toLowerCase()}`;
-      const role = new iam.Role(this, `${kind}GatewayRole`, {
-        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
-          conditions: {
-            StringEquals: { 'aws:SourceAccount': this.account },
-            // Gateway IDは作成後に決まるため、名前の接頭辞で循環依存を避ける。
-            ArnLike: {
-              'aws:SourceArn': this.formatArn({
-                service: 'bedrock-agentcore',
-                resource: 'gateway',
-                resourceName: `${gatewayName}-*`,
-              }),
-            },
-          },
-        }),
-      });
-      const invokePolicy = new iam.Policy(this, `${kind}InvokeTool`, {
-        roles: [role],
-        statements: [
-          new iam.PolicyStatement({
-            actions: ['lambda:InvokeFunction'],
-            resources: [tool.functionArn],
-          }),
-        ],
-      });
-      const gateway = new agentcore.CfnGateway(this, `${kind}Gateway`, {
-        name: gatewayName,
-        description: `${kind} endpoint for the Muse meeting room booking test`,
-        protocolType: 'MCP',
-        protocolConfiguration: {
-          mcp: {
-            supportedVersions: [
-              '2025-03-26',
-              '2025-06-18',
-              '2025-11-25',
-              '2026-07-28',
-            ],
-            instructions:
-              'Search, create, list, and cancel fictional meeting room reservations. Interpret dates in Asia/Tokyo. Confirm writes with the user and check ok before reporting success.',
-          },
-        },
-        authorizerType: kind === 'Public' ? 'NONE' : 'CUSTOM_JWT',
-        authorizerConfiguration:
-          kind === 'Public'
-            ? undefined
-            : {
-                customJwtAuthorizer: {
-                  discoveryUrl,
-                  allowedClients: [
-                    client.userPoolClientId,
-                    proxyClient.userPoolClientId,
-                  ],
-                  allowedScopes: [oauthScope.scopeName],
-                  customClaims: [
-                    {
-                      inboundTokenClaimName: 'token_use',
-                      inboundTokenClaimValueType: 'STRING',
-                      authorizingClaimMatchValue: {
-                        claimMatchOperator: 'EQUALS',
-                        claimMatchValue: { matchValueString: 'access' },
-                      },
-                    },
-                  ],
-                },
-              },
-        roleArn: role.roleArn,
-      });
-      gateway.node.addDependency(invokePolicy);
-      if (kind === 'Authenticated') gateway.node.addDependency(domain);
-      const target = new agentcore.CfnGatewayTarget(
-        this,
-        `${kind}BookingTarget`,
-        {
-          gatewayIdentifier: gateway.attrGatewayIdentifier,
-          name: 'booking',
-          description:
-            'Fictional meeting room reservations isolated by authentication mode',
-          credentialProviderConfigurations: [
-            { credentialProviderType: 'GATEWAY_IAM_ROLE' },
-          ],
-          targetConfiguration: {
-            mcp: {
-              lambda: {
-                lambdaArn: tool.functionArn,
-                toolSchema: { inlinePayload: toolDefinitions },
-              },
-            },
-          },
-        }
-      );
-      target.node.addDependency(invokePolicy);
-      return gateway;
-    };
     const oauthProxy = new OAuthProxy(this, 'OAuthProxy', {
       prefix,
       issuer,
@@ -291,22 +189,107 @@ export class McpTestStack extends cdk.Stack {
       preventUserExistenceErrors: true,
     });
     proxyClient.node.addDependency(resourceServer);
-    const publicGateway = createGateway('Public');
-    const authenticatedGateway = createGateway('Authenticated');
+    const gatewayName = `${prefix}-authenticated`;
+    const gatewayRole = new iam.Role(this, 'AuthenticatedGatewayRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          // Gateway IDは作成後に決まるため、名前の接頭辞で循環依存を避ける。
+          ArnLike: {
+            'aws:SourceArn': this.formatArn({
+              service: 'bedrock-agentcore',
+              resource: 'gateway',
+              resourceName: `${gatewayName}-*`,
+            }),
+          },
+        },
+      }),
+    });
+    const invokePolicy = new iam.Policy(this, 'AuthenticatedInvokeTool', {
+      roles: [gatewayRole],
+      statements: [
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [tool.functionArn],
+        }),
+      ],
+    });
+    const gateway = new agentcore.CfnGateway(this, 'AuthenticatedGateway', {
+      name: gatewayName,
+      description:
+        'Authenticated endpoint for the Muse meeting room booking test',
+      protocolType: 'MCP',
+      protocolConfiguration: {
+        mcp: {
+          supportedVersions: [
+            '2025-03-26',
+            '2025-06-18',
+            '2025-11-25',
+            '2026-07-28',
+          ],
+          instructions:
+            'Search, create, list, and cancel fictional meeting room reservations. Interpret dates in Asia/Tokyo. Confirm writes with the user and check ok before reporting success.',
+        },
+      },
+      authorizerType: 'CUSTOM_JWT',
+      authorizerConfiguration: {
+        customJwtAuthorizer: {
+          discoveryUrl,
+          allowedClients: [
+            client.userPoolClientId,
+            proxyClient.userPoolClientId,
+          ],
+          allowedScopes: [oauthScope.scopeName],
+          customClaims: [
+            {
+              inboundTokenClaimName: 'token_use',
+              inboundTokenClaimValueType: 'STRING',
+              authorizingClaimMatchValue: {
+                claimMatchOperator: 'EQUALS',
+                claimMatchValue: { matchValueString: 'access' },
+              },
+            },
+          ],
+        },
+      },
+      roleArn: gatewayRole.roleArn,
+    });
+    gateway.node.addDependency(invokePolicy);
+    gateway.node.addDependency(domain);
+    const target = new agentcore.CfnGatewayTarget(
+      this,
+      'AuthenticatedBookingTarget',
+      {
+        gatewayIdentifier: gateway.attrGatewayIdentifier,
+        name: 'booking',
+        description: 'Fictional meeting room reservations',
+        credentialProviderConfigurations: [
+          { credentialProviderType: 'GATEWAY_IAM_ROLE' },
+        ],
+        targetConfiguration: {
+          mcp: {
+            lambda: {
+              lambdaArn: tool.functionArn,
+              toolSchema: { inlinePayload: toolDefinitions },
+            },
+          },
+        },
+      }
+    );
+    target.node.addDependency(invokePolicy);
     // これらの値をRevisionの環境変数に渡すと、Revision → Gateway → Cognitoクライアント
     // → Endpoint → Revisionと循環する。SSM Parameterに置き、Proxyが起動時に読む。
     new ssm.StringParameter(this, 'OAuthProxyConfig', {
       parameterName: oauthProxy.configParameterName,
       stringValue: this.toJsonString({
         baseUrl: oauthProxy.baseUrl,
-        gatewayUrl: authenticatedGateway.attrGatewayUrl,
+        gatewayUrl: gateway.attrGatewayUrl,
         clientId: proxyClient.userPoolClientId,
       }),
     });
 
     const outputs: Record<string, string> = {
-      PublicGatewayUrl: publicGateway.attrGatewayUrl,
-      AuthenticatedGatewayUrl: authenticatedGateway.attrGatewayUrl,
+      AuthenticatedGatewayUrl: gateway.attrGatewayUrl,
       UserPoolId: pool.userPoolId,
       ClientId: client.userPoolClientId,
       ProxyClientId: proxyClient.userPoolClientId,

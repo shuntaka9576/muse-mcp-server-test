@@ -25,11 +25,8 @@ export function createPool(
     maxLifetimeSeconds: 300,
   });
 }
-export function bookingSchema(
-  value: string | undefined
-): 'booking_noauth' | 'booking_auth' {
-  if (value !== 'booking_noauth' && value !== 'booking_auth')
-    throw new Error('Invalid BOOKING_SCHEMA');
+export function bookingSchema(value: string | undefined): 'booking_auth' {
+  if (value !== 'booking_auth') throw new Error('Invalid BOOKING_SCHEMA');
   return value;
 }
 export async function withTransaction<T>(

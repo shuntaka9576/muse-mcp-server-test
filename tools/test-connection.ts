@@ -8,7 +8,6 @@ import { TOOL_NAMES } from '../apps/mcp-tools/src/booking.js';
 
 const { values } = parseArgs({
   options: {
-    auth: { type: 'boolean', default: false },
     date: { type: 'string' },
     outputs: { type: 'string', default: '.local/outputs.json' },
     stack: { type: 'string', default: 'dev-muse-mcp-test' },
@@ -22,7 +21,6 @@ async function main(): Promise<void> {
   const output = allOutputs[values.stack!];
   if (!output) throw new Error(`出力ファイルに ${values.stack} がありません。`);
   for (const key of [
-    'PublicGatewayUrl',
     'AuthenticatedGatewayUrl',
     'AuthorizationEndpoint',
     'TokenEndpoint',
@@ -32,10 +30,7 @@ async function main(): Promise<void> {
   ]) {
     if (!output[key]) throw new Error(`CDKの出力に ${key} がありません。`);
   }
-  const gatewayUrl = new URL(
-    values.auth ? output.AuthenticatedGatewayUrl : output.PublicGatewayUrl
-  );
-  let accessToken: string | undefined;
+  const gatewayUrl = new URL(output.AuthenticatedGatewayUrl);
   const checks: Record<string, unknown> = {};
 
   async function assertDenied(
@@ -78,48 +73,44 @@ async function main(): Promise<void> {
     return response;
   }
 
-  if (values.auth) {
-    const unauthorized = await assertDenied('noToken');
-    await assertDenied('invalidToken', 'invalid-token');
-    const metadataUrl = unauthorized.headers
-      .get('www-authenticate')
-      ?.match(/resource_metadata="([^"]+)"/)?.[1];
-    if (metadataUrl) {
-      const url = new URL(metadataUrl);
-      if (url.origin !== gatewayUrl.origin)
-        throw new Error('resource_metadataの接続先がGatewayと異なります。');
-      const metadata = await fetch(url, {
-        signal: AbortSignal.timeout(30_000),
-        redirect: 'error',
-      });
-      if (!metadata.ok)
-        throw new Error(
-          `保護リソースメタデータを取得できません: HTTP ${metadata.status}`
-        );
-      checks.protectedResourceMetadata = await metadata.json();
-    } else {
-      checks.protectedResourceMetadata =
-        'WWW-Authenticate に resource_metadata がありませんでした。';
-    }
-    const tokens = await login({
-      authorizationEndpoint: output.AuthorizationEndpoint,
-      tokenEndpoint: output.TokenEndpoint,
-      clientId: output.ClientId,
-      scope: output.Scope,
-      callbackUrl: output.LocalCallbackUrl,
+  const unauthorized = await assertDenied('noToken');
+  await assertDenied('invalidToken', 'invalid-token');
+  const metadataUrl = unauthorized.headers
+    .get('www-authenticate')
+    ?.match(/resource_metadata="([^"]+)"/)?.[1];
+  if (metadataUrl) {
+    const url = new URL(metadataUrl);
+    if (url.origin !== gatewayUrl.origin)
+      throw new Error('resource_metadataの接続先がGatewayと異なります。');
+    const metadata = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
+      redirect: 'error',
     });
-    await assertDenied('idToken', tokens.idToken);
-    accessToken = tokens.accessToken;
+    if (!metadata.ok)
+      throw new Error(
+        `保護リソースメタデータを取得できません: HTTP ${metadata.status}`
+      );
+    checks.protectedResourceMetadata = await metadata.json();
+  } else {
+    checks.protectedResourceMetadata =
+      'WWW-Authenticate に resource_metadata がありませんでした。';
   }
+  const tokens = await login({
+    authorizationEndpoint: output.AuthorizationEndpoint,
+    tokenEndpoint: output.TokenEndpoint,
+    clientId: output.ClientId,
+    scope: output.Scope,
+    callbackUrl: output.LocalCallbackUrl,
+  });
+  await assertDenied('idToken', tokens.idToken);
+  const accessToken = tokens.accessToken;
 
   const client = new Client({ name: 'muse-mcp-server-test', version: '0.1.0' });
   const transport = new StreamableHTTPClientTransport(gatewayUrl, {
-    requestInit: accessToken
-      ? {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          redirect: 'error',
-        }
-      : { redirect: 'error' },
+    requestInit: {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      redirect: 'error',
+    },
   });
   try {
     await client.connect(transport, { timeout: 30_000 });
@@ -163,16 +154,14 @@ async function main(): Promise<void> {
       }
       throw new Error(`${name}: 予約ツールのJSON応答がありません。`);
     }, date);
-    const mode = values.auth ? 'authenticated' : 'public';
     await mkdir('.local', { recursive: true });
-    const resultPath = `.local/result-${mode}.json`;
+    const resultPath = '.local/result-authenticated.json';
     await writeFile(
       resultPath,
       JSON.stringify(
         {
           testedAt: new Date().toISOString(),
           gatewayUrl: gatewayUrl.href,
-          mode,
           checks,
           server: client.getServerVersion(),
           tools,
